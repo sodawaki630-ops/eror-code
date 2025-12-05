@@ -1,347 +1,520 @@
-# streamlit_ai_helper.py
 import streamlit as st
 import ast
 import re
 import textwrap
-import openai
-from typing import List, Tuple, Dict, Any, Optional
+from collections import defaultdict
 
-# ----------------------------
-# Page config + Neon + Dark CSS
-# ----------------------------
-st.set_page_config(page_title="AI Python Helper — Neon", page_icon="🤖", layout="wide")
-NEON_CSS = """
-<style>
-:root{
-  --bg1: #050306;
-  --bg2: #0f0b1a;
-  --card: rgba(255,255,255,0.03);
-  --accent: #7cffcb;
-  --accent2: #7c8cff;
-  --text: #e6f0ff;
+st.set_page_config(page_title="Ultimate Error Helper Pro", page_icon="🧰", layout="wide")
+st.title("🧰 Ultimate Python Error Helper — Pro")
+st.markdown("ตรวจ, rewrite, อธิบายทีละบรรทัด, ตรวจ PEP8 แบบเบื้องต้น และวิเคราะห์ performance (static analysis, ปลอดภัย)")
+
+# -----------------------
+# UI: inputs
+# -----------------------
+st.sidebar.header("Options")
+dark = st.sidebar.checkbox("Dark mode", value=False)
+show_raw_ast = st.sidebar.checkbox("แสดง AST (debug)", value=False)
+max_line_length = st.sidebar.number_input("PEP8 max line length", min_value=60, max_value=200, value=79)
+
+if dark:
+    st.markdown(
+        """
+        <style>
+        body { background-color: #0b1221; color: #c9d1d9; }
+        .stTextArea textarea { background-color: #0e1624 !important; color: #c9d1d9 !important; }
+        .stCodeBlock { background-color: #0e1624 !important; color: #c9d1d9 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.subheader("วางโค้ด Python ของคุณที่ต้องการให้ตรวจและแก้ไข (ป้อนหลายบรรทัดได้)")
+user_code = st.text_area("โค้ด Python", value="""# ตัวอย่าง
+def greet(name)
+    print("Hello " + name)
+
+for i in range(5):
+    print(i)
+""", height=260)
+
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    analyze_btn = st.button("🔍 วิเคราะห์")
+with col2:
+    rewrite_btn = st.button("✍️ Rewrite + Suggest")
+with col3:
+    full_run = st.button("🔁 วิเคราะห์ + Rewrite ทั้งหมด")
+
+# -----------------------
+# Helpers: safety & utils
+# -----------------------
+PY_KEYWORDS = {
+    "False","None","True","and","as","assert","async","await","break","class","continue","def","del","elif","else",
+    "except","finally","for","from","global","if","import","in","is","lambda","nonlocal","not","or","pass","raise",
+    "return","try","while","with","yield"
 }
-body {
-  background: radial-gradient(circle at 10% 10%, #07102b 0%, var(--bg1) 30%, var(--bg2) 100%);
-  color: var(--text);
-}
-.stApp > header { background: linear-gradient(90deg, rgba(124,255,203,0.06), rgba(124,140,255,0.03)); }
-.stButton>button { border-radius: 12px; padding: 8px 12px; box-shadow: 0 6px 18px rgba(124,255,203,0.06); }
-.stTextArea textarea, .stTextInput input {
-  background: rgba(255,255,255,0.02) !important;
-  color: var(--text) !important;
-  border: 1px solid rgba(124,140,255,0.12) !important;
-  border-radius: 8px;
-}
-.code-block, pre, code {
-  background: rgba(0,0,0,0.35) !important;
-  border-left: 3px solid rgba(124,255,203,0.18);
-  padding: 8px !important;
-  border-radius: 6px;
-}
-.neon-title {
-  font-weight: 700;
-  text-shadow: 0 0 8px rgba(124,255,203,0.15), 0 0 20px rgba(124,140,255,0.06);
-}
-.sidebar .stButton>button { background: linear-gradient(90deg,#7cffcb44,#7c8cff44); color: #eafaf3; }
-</style>
-"""
-st.markdown(NEON_CSS, unsafe_allow_html=True)
 
-st.markdown("<h1 class='neon-title'>🤖 AI Python Helper — Neon UI</h1>", unsafe_allow_html=True)
-st.write("Static analysis + optional AI deep analysis (rewrite, line-by-line explanation, PEP8 & performance hints).")
+identifier_re = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# ----------------------------
-# Sidebar (options)
-# ----------------------------
-st.sidebar.header("⚙️ Options / AI")
-use_ai = st.sidebar.checkbox("Enable AI analysis (requires API key)", value=False)
-api_key_input = st.sidebar.text_input("OpenAI API Key (optional)", type="password")
-model_choice = st.sidebar.selectbox("Model (if using AI)", options=["gpt-4o-mini", "gpt-4o", "gpt-4o-mini-tts"], index=0)
-temperature = st.sidebar.slider("AI creativity (temperature)", 0.0, 1.0, 0.2, 0.05)
-show_pep8 = st.sidebar.checkbox("Show PEP8 suggestions", value=True)
-show_perf = st.sidebar.checkbox("Show performance hints", value=True)
-st.sidebar.markdown("---")
-st.sidebar.markdown("⚠️ App does **not** execute your code. AI analysis will send the code to the selected model if enabled.")
-
-if api_key_input:
-    openai.api_key = api_key_input
-else:
-    import os
-    if os.getenv("OPENAI_API_KEY"):
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# ----------------------------
-# Input: code
-# ----------------------------
-st.subheader("Paste your Python code below")
-code_input = st.text_area("Python code", height=300, value="# ตัวอย่าง: พิมพ์โค้ดที่นี่\n")
-
-col_a, col_b, col_c = st.columns([1, 1, 1])
-analyze_btn = col_a.button("🔍 Static Analyze")
-ai_btn = col_b.button("🤖 AI Analyze & Rewrite")
-all_btn = col_c.button("🔁 All (Static + AI)")
-
-# ----------------------------
-# Utilities: Static analysis
-# ----------------------------
-def safe_parse(code: str) -> Tuple[Optional[ast.AST], Optional[str]]:
+def safe_parse(code):
+    """Attempt to parse code into AST. Return (tree, error_message)."""
     try:
         tree = ast.parse(code)
         return tree, None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
-def pep8_heuristics(code: str, max_len:int=79) -> List[Tuple[int,str]]:
-    issues=[]
-    for i, line in enumerate(code.splitlines(), start=1):
-        if len(line)>max_len:
-            issues.append((i, f"line too long ({len(line)}>{max_len})"))
-        if line.rstrip()!=line:
-            issues.append((i, "trailing whitespace"))
-        leading = len(line)-len(line.lstrip(' '))
-        if line.strip() and leading%4!=0:
-            issues.append((i, "indentation not multiple of 4"))
+def normalize_indentation(code):
+    # replace tabs with 4 spaces and remove trailing spaces
+    lines = code.splitlines()
+    new = []
+    for ln in lines:
+        ln2 = ln.replace("\t", "    ").rstrip()
+        new.append(ln2)
+    return "\n".join(new) + ("\n" if code and not code.endswith("\n") else "")
+
+def simple_auto_fix(code):
+    """
+    Basic automatic fixes:
+    - normalize indentation (tabs -> 4 spaces)
+    - if def/class line has no body, add '    pass'
+    - ensure trailing newline
+    - fix common missing colon by heuristic (line ending with def ... or if ... but missing ':')
+    Note: this is conservative and won't attempt dangerous or ambiguous fixes.
+    """
+    code = normalize_indentation(code)
+    lines = code.splitlines()
+    fixed_lines = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.strip()
+        # fix def/class/if/for/while/match that miss colon at EOL
+        header_match = re.match(r"^(def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)|class\s+[A-Za-z_][A-Za-z0-9_]*\s*(\(.+\))?|if\s+.+|for\s+.+|while\s+.+|try|except\s+.+|else|elif\s+.+|with\s+.+)$", stripped)
+        if header_match and not stripped.endswith(":"):
+            fixed_lines.append(ln + ":")
+            i += 1
+            # if next line is end or next line is also dedent, insert pass
+            if i >= len(lines) or (lines[i].strip() == "" or len(lines[i]) - len(lines[i].lstrip()) <= len(ln) - len(ln.lstrip())):
+                fixed_lines.append(" " * (len(ln) - len(ln.lstrip()) + 4) + "pass")
+            continue
+
+        # add pass to empty def/class with no body
+        def_match = re.match(r"^\s*def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)\s*:$", ln)
+        class_match = re.match(r"^\s*class\s+[A-Za-z_][A-Za-z0-9_]*\s*(\(.*\))?\s*:$", ln)
+        if (def_match or class_match):
+            # look ahead to see if next non-empty line is more indented
+            j = i + 1
+            body_found = False
+            while j < len(lines):
+                if lines[j].strip() == "":
+                    j += 1
+                    continue
+                body_indent = len(lines[j]) - len(lines[j].lstrip())
+                header_indent = len(ln) - len(ln.lstrip())
+                if body_indent > header_indent:
+                    body_found = True
+                break
+            if not body_found:
+                fixed_lines.append(ln)
+                fixed_lines.append(" " * (len(ln) - len(ln.lstrip()) + 4) + "pass")
+                i += 1
+                continue
+
+        fixed_lines.append(ln)
+        i += 1
+
+    fixed_code = "\n".join(fixed_lines)
+    if fixed_code and not fixed_code.endswith("\n"):
+        fixed_code += "\n"
+    return fixed_code
+
+def attempt_unparse(tree):
+    """Try to generate normalized code from AST. Fall back to None if not available."""
+    try:
+        # ast.unparse available in Python 3.9+
+        return ast.unparse(tree)
+    except Exception:
+        return None
+
+# -----------------------
+# Analysis Functions
+# -----------------------
+def pep8_checks(code, max_line=79):
+    issues = []
+    lines = code.splitlines()
+    for i, line in enumerate(lines, start=1):
+        if len(line) > max_line:
+            issues.append((i, "line-too-long", f"บรรทัดยาวเกิน {max_line} ตัวอักษร ({len(line)})"))
+        if line.rstrip() != line:
+            issues.append((i, "trailing-whitespace", "มีช่องว่างท้ายบรรทัด"))
+        # indent not multiple of 4?
+        leading = len(line) - len(line.lstrip(' '))
+        if leading % 4 != 0:
+            # ignore completely blank lines
+            if line.strip():
+                issues.append((i, "indentation", "การย่อหน้าไม่เป็น multiple ของ 4 ช่อง (PEP8 แนะนำ 4)"))
+        # two spaces before inline comment?
+        if "#" in line:
+            code_part = line.split("#", 1)[0]
+            if code_part.endswith("  "):
+                issues.append((i, "whitespace-before-comment", "มีสองช่องว่างก่อน comment (แนะนำ 2 คือ acceptable แต่เช็คให้)"))
+        # space around operator simple checks
         if re.search(r"\w=[^\s=]", line) or re.search(r"[^\s=]=\w", line):
-            issues.append((i, "missing spaces around operator"))
-    # simple naming checks
+            issues.append((i, "whitespace", "อาจไม่มีช่องว่างรอบเครื่องหมาย ="))
+
+    # naming conventions (variables/functions)
     try:
         tree = ast.parse(code)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
-                if not re.match(r"^[a-z_][a-z0-9_]*$", node.name):
-                    issues.append((node.lineno, f"function name not snake_case: {node.name}"))
+                name = node.name
+                if not re.match(r"^[a-z_][a-z0-9_]*$", name):
+                    issues.append((node.lineno, "func-name", f"ชื่ิอฟังก์ชัน '{name}' ไม่เป็น snake_case"))
             if isinstance(node, ast.ClassDef):
-                if not re.match(r"^[A-Z][A-Za-z0-9]+$", node.name):
-                    issues.append((node.lineno, f"class name not CamelCase: {node.name}"))
+                name = node.name
+                if not re.match(r"^[A-Z][A-Za-z0-9]+$", name):
+                    issues.append((node.lineno, "class-name", f"ชื่อคลาส '{name}' ไม่เป็น CamelCase"))
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        var = target.id
+                        if not re.match(r"^[a-z_][a-z0-9_]*$", var):
+                            issues.append((node.lineno, "var-name", f"ชื่อตัวแปร '{var}' ไม่เป็น snake_case"))
     except Exception:
         pass
+
     return issues
 
-def explain_ast_lines(code: str) -> List[Tuple[int,str]]:
+def explain_by_ast(code):
+    """Return list of (lineno, explanation) by traversing AST and mapping nodes to lines."""
     try:
         tree = ast.parse(code)
     except Exception as e:
-        return [(-1, f"Cannot parse: {e}")]
-    expl=[]
+        return [("0", f"ไม่สามารถอธิบายโค้ดได้: {e}")]
+    explanations = defaultdict(list)
     for node in ast.walk(tree):
-        if hasattr(node, "lineno"):
-            ln = node.lineno
-            if isinstance(node, ast.Assign):
-                try:
-                    targ = ast.unparse(node.targets[0])
-                except Exception:
-                    targ = "assignment"
-                expl.append((ln, f"Assign: {targ} = ..."))
-            elif isinstance(node, ast.FunctionDef):
-                args = [a.arg for a in node.args.args]
-                expl.append((ln, f"FunctionDef: {node.name}({', '.join(args)})"))
-            elif isinstance(node, ast.If):
-                expl.append((ln, "If statement"))
-            elif isinstance(node, ast.For):
-                expl.append((ln, "For loop"))
-            elif isinstance(node, ast.While):
-                expl.append((ln, "While loop"))
-            elif isinstance(node, ast.Import):
-                expl.append((ln, "Import statement"))
-            elif isinstance(node, ast.ImportFrom):
-                expl.append((ln, f"from {node.module} import ..."))
-            elif isinstance(node, ast.Return):
-                expl.append((ln, "Return statement"))
-            elif isinstance(node, ast.Call):
-                try:
-                    func = ast.unparse(node.func)
-                except Exception:
-                    func = "call"
-                expl.append((ln, f"Call: {func}(...)"))
-    expl_sorted = sorted(expl, key=lambda x:x[0])
-    # compress to one explanation per line (join multiple)
-    grouped = {}
-    for ln, text in expl_sorted:
-        grouped.setdefault(ln, []).append(text)
-    return [(ln, " | ".join(grouped[ln])) for ln in sorted(grouped.keys())]
+        if isinstance(node, ast.Assign):
+            # simplistic: describe assignment
+            try:
+                targets = [ast.unparse(t) for t in node.targets]
+            except Exception:
+                targets = [getattr(node.targets[0], 'id', 'variable')]
+            val = None
+            try:
+                val = ast.unparse(node.value)
+            except Exception:
+                val = type(node.value).__name__
+            explanations[node.lineno].append(f"กำหนดตัวแปร {' ,'.join(targets)} = {val}")
+        elif isinstance(node, ast.FunctionDef):
+            args = [a.arg for a in node.args.args]
+            explanations[node.lineno].append(f"ประกาศฟังก์ชัน `{node.name}({', '.join(args)})`")
+        elif isinstance(node, ast.If):
+            explanations[node.lineno].append("เงื่อนไข `if` ถูกใช้เพื่อตรวจสอบค่าบางอย่าง")
+        elif isinstance(node, ast.For):
+            explanations[node.lineno].append("วนลูป `for` เพื่อทำซ้ำค่าหลาย ๆ ค่า")
+        elif isinstance(node, ast.While):
+            explanations[node.lineno].append("วนลูป `while` (เงื่อนไขเป็นตัวกำหนดการหยุด)")
+        elif isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+            explanations[node.lineno].append(f"นำเข้าโมดูล: {', '.join(names)}")
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            names = [alias.name for alias in node.names]
+            explanations[node.lineno].append(f"นำเข้า {', '.join(names)} จาก `{mod}`")
+        elif isinstance(node, ast.Return):
+            explanations[node.lineno].append("คืนค่าจากฟังก์ชัน (return)")
+        elif isinstance(node, ast.Call):
+            # function call explanation
+            try:
+                funcname = ast.unparse(node.func)
+            except Exception:
+                funcname = "call"
+            explanations[node.lineno].append(f"เรียกใช้งานฟังก์ชัน/เมธอด `{funcname}`")
+    # convert to sorted list by line
+    out = []
+    for lineno in sorted(explanations.keys()):
+        for text in explanations[lineno]:
+            out.append((lineno, text))
+    return out
 
-def performance_hints(code: str) -> List[str]:
-    hints=[]
+def performance_hints(code):
+    hints = []
     try:
         tree = ast.parse(code)
     except Exception:
-        return ["Cannot parse code for performance analysis."]
-    # nested loop depth
-    maxd=0
-    def visit_depth(node, d=0):
-        nonlocal maxd
+        return ["ไม่สามารถวิเคราะห์ performance ได้ เนื่องจากโค้ดมี Syntax Error"]
+
+    # detect nested loops depth
+    max_depth = 0
+    def loop_depth(node, depth=0):
+        nonlocal max_depth
         if isinstance(node, (ast.For, ast.While)):
-            d+=1
-            maxd = max(maxd,d)
-        for ch in ast.iter_child_nodes(node):
-            visit_depth(ch,d)
-    visit_depth(tree)
-    if maxd>=3:
-        hints.append(f"Nested loop depth = {maxd}. Consider reducing complexity or using vectorized library.")
-    # append in loop pattern
-    class AppendLoopVisitor(ast.NodeVisitor):
+            depth += 1
+            max_depth = max(max_depth, depth)
+        for child in ast.iter_child_nodes(node):
+            loop_depth(child, depth)
+    loop_depth(tree)
+    if max_depth >= 3:
+        hints.append(f"มี nested loop ความลึก {max_depth} — พิจารณา refactor หรือใช้ algorithms ที่ซับซ้อนน้อยลง")
+
+    # detect list append in loops (suggest listcomp)
+    class AppendVisitor(ast.NodeVisitor):
         def __init__(self):
-            self.appends=[]
-            self.in_loop=0
-        def visit_For(self,node):
-            self.in_loop+=1; self.generic_visit(node); self.in_loop-=1
-        def visit_While(self,node):
-            self.in_loop+=1; self.generic_visit(node); self.in_loop-=1
-        def visit_Call(self,node):
-            if isinstance(node.func, ast.Attribute) and getattr(node.func,'attr',None)=="append" and self.in_loop>0:
+            self.append_in_loop = []
+            self.in_loop = 0
+            self.current_target = None
+        def visit_For(self, node):
+            self.in_loop += 1
+            self.generic_visit(node)
+            self.in_loop -= 1
+        def visit_While(self, node):
+            self.in_loop += 1
+            self.generic_visit(node)
+            self.in_loop -= 1
+        def visit_Call(self, node):
+            # look for x.append(...)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "append":
+                if self.in_loop > 0:
+                    try:
+                        owner = ast.unparse(node.func.value)
+                    except Exception:
+                        owner = "list"
+                    self.append_in_loop.append((node.lineno, owner))
+            self.generic_visit(node)
+    av = AppendVisitor()
+    av.visit(tree)
+    if av.append_in_loop:
+        for ln, owner in av.append_in_loop[:5]:
+            hints.append(f"ที่บรรทัด {ln} พบ `{owner}.append(...)` ภายใน loop — พิจารณาใช้ list comprehension หรือ pre-allocate list เพื่อประสิทธิภาพ")
+
+    # detect recursion (simple)
+    funcs = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            funcs[node.name] = node
+    for name, node in funcs.items():
+        class RecVisitor(ast.NodeVisitor):
+            def __init__(self, fname):
+                self.fname = fname
+                self.recursive = False
+            def visit_Call(self, n):
                 try:
-                    owner = ast.unparse(node.func.value)
+                    fname = ast.unparse(n.func)
                 except Exception:
-                    owner = "list"
-                self.appends.append((node.lineno, owner))
-            self.generic_visit(node)
-    v=AppendLoopVisitor(); v.visit(tree)
-    for ln, owner in v.appends[:5]:
-        hints.append(f"Found {owner}.append(...) inside loop at line {ln}; consider listcomp or preallocation.")
-    # string concat in loop
-    class ConcatVisitor(ast.NodeVisitor):
+                    fname = ""
+                if fname == self.fname:
+                    self.recursive = True
+                self.generic_visit(n)
+        rv = RecVisitor(name)
+        rv.visit(node)
+        if rv.recursive:
+            hints.append(f"ฟังก์ชัน `{name}` เรียกตัวเอง (recursion) — ตรวจ stack depth และพิจารณาใช้ iterative ถ้าจำเป็น")
+
+    # heavy string concatenation in loop: detect `s += something` inside loop
+    class StrConcatVisitor(ast.NodeVisitor):
         def __init__(self):
-            self.found=[]
-            self.in_loop=0
-        def visit_For(self,node):
-            self.in_loop+=1; self.generic_visit(node); self.in_loop-=1
-        def visit_While(self,node):
-            self.in_loop+=1; self.generic_visit(node); self.in_loop-=1
-        def visit_AugAssign(self,node):
-            if self.in_loop and isinstance(node.op, ast.Add) and isinstance(node.target, ast.Name):
-                self.found.append(node.lineno)
-            self.generic_visit(node)
-    cv=ConcatVisitor(); cv.visit(tree)
-    for ln in cv.found[:5]:
-        hints.append(f"String concat with += in loop at line {ln}; consider join on list.")
+            self.concat_in_loop = []
+            self.in_loop = 0
+        def visit_For(self, n):
+            self.in_loop += 1
+            self.generic_visit(n)
+            self.in_loop -= 1
+        def visit_While(self, n):
+            self.in_loop += 1
+            self.generic_visit(n)
+            self.in_loop -= 1
+        def visit_AugAssign(self, n):
+            if isinstance(n.op, ast.Add) and isinstance(n.target, ast.Name):
+                if self.in_loop > 0:
+                    self.concat_in_loop.append(n.lineno)
+            self.generic_visit(n)
+    scv = StrConcatVisitor()
+    scv.visit(tree)
+    if scv.concat_in_loop:
+        for ln in scv.concat_in_loop[:5]:
+            hints.append(f"ที่บรรทัด {ln} พบการต่อ string (`+=`) ใน loop — ใช้ list append แล้ว `''.join()` แทนจะเร็วกว่า")
+
     if not hints:
-        hints.append("No obvious static performance issues found.")
+        hints.append("ไม่พบ pattern ที่ชี้ชัดเรื่อง performance. โค้ดดูไม่มีปัญหา performance ที่ชัดเจนจาก static heuristics")
+
     return hints
 
-# ----------------------------
-# AI helpers
-# ----------------------------
-def build_ai_prompt(code: str, tasks: List[str]) -> str:
-    """
-    Build a concise prompt describing tasks for the AI.
-    tasks: list like ["rewrite", "line_by_line", "pep8", "performance"]
-    """
-    intro = (
-        "You are a helpful Python assistant. The user will provide source code. "
-        "Do NOT execute it. Provide safe, concise, actionable output.\n\n"
-    )
-    instructions = []
-    if "rewrite" in tasks:
-        instructions.append(
-            "1) Provide a corrected, runnable rewrite of the code (preserve behavior where clear). "
-            "If behavior is ambiguous, explain uncertainty and provide a conservative fix."
-        )
-    if "line_by_line" in tasks:
-        instructions.append(
-            "2) Provide a line-by-line explanation in Thai (keep each line short and numbered)."
-        )
-    if "pep8" in tasks:
-        instructions.append("3) Provide PEP8 style suggestions and show a few example fixes.")
-    if "performance" in tasks:
-        instructions.append("4) Provide performance analysis and specific refactor suggestions.")
-    prompt = intro + "\n".join(instructions) + "\n\nCode:\n" + code + "\n\nRespond in JSON with keys: rewritten, explanation, pep8, performance, suggestions. Keep rewritten code in a single string."
-    return prompt
-
-def call_openai_chat(prompt: str, model: str="gpt-4o-mini", temperature: float=0.2, max_tokens: int=1600) -> Optional[Dict[str,Any]]:
-    if not getattr(openai, "api_key", None):
-        st.error("OpenAI API key not provided.")
-        return None
+def suggest_structure(code):
+    suggestions = []
+    # recommend modularization: functions for repeated logic
     try:
-        resp = openai.ChatCompletion.create(
-            model=model,
-            messages=[{"role":"user","content":prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        text = resp.choices[0].message.content
-        # try parse JSON out of response heuristically
-        # user-facing: show raw text if not JSON
-        try:
-            import json as _json
-            parsed = _json.loads(text)
-            return parsed
-        except Exception:
-            return {"raw": text}
-    except Exception as e:
-        st.error(f"OpenAI API error: {e}")
-        return None
+        tree = ast.parse(code)
+    except Exception:
+        return ["ไม่สามารถแนะนำโครงสร้างได้ เนื่องจากมี Syntax Error"]
 
-# ----------------------------
+    func_count = sum(1 for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+    top_level_statements = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom))]
+    if len(top_level_statements) > 5:
+        suggestions.append("พบโค้ดหลายบรรทัดที่อยู่บนระดับ top-level — แนะนำย้ายโค้ดเหล่านี้เข้าไปในฟังก์ชันและเรียกจาก `if __name__ == '__main__'`")
+    if func_count == 0 and len(top_level_statements) > 0:
+        suggestions.append("แนะนำสร้างฟังก์ชันแยกงานต่างๆ เพื่อให้ง่ายต่อการทดสอบและเรียกใช้ซ้ำ")
+    # recommend adding main guard
+    if not any(isinstance(n, ast.If) and getattr(n.test, 'left', None) and getattr(n.test.left, 'id', None) == '__name__' for n in tree.body if isinstance(n, ast.If)):
+        suggestions.append("พิจารณาเพิ่ม `if __name__ == '__main__':` เพื่อให้โค้ดสามารถนำเข้าเป็นโมดูลได้โดยไม่รันทันที")
+    # recommend splitting big functions
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef):
+            n_lines = (getattr(n, 'end_lineno', None) or n.lineno) - n.lineno + 1
+            if n_lines > 80:
+                suggestions.append(f"ฟังก์ชัน `{n.name}` ยาว {n_lines} บรรทัด — แนะนำแยกเป็นฟังก์ชันย่อย")
+    if not suggestions:
+        suggestions.append("โครงสร้างพื้นฐานดูเรียบร้อย — พิจารณาเพิ่ม docstring ให้ฟังก์ชันและคอมเมนต์สั้น ๆ")
+    return suggestions
+
+# -----------------------
 # Main actions
-# ----------------------------
-def do_static_analysis(code: str):
-    tree, err = safe_parse(code)
-    st.subheader("🔎 Static Analysis")
-    if err:
-        st.error(f"Syntax parse error: {err}")
+# -----------------------
+def do_full_analysis(code, max_line_len=79):
+    out = {}
+    code_orig = code
+    code_norm = normalize_indentation(code_orig)
+    out['normalized_code'] = code_norm
+    tree, parse_err = safe_parse(code_norm)
+    out['syntax_error'] = parse_err
+    if parse_err:
+        # attempt automatic fix then reparse
+        fixed = simple_auto_fix(code_norm)
+        tree2, parse_err2 = safe_parse(fixed)
+        out['auto_fixed_attempt'] = fixed
+        out['auto_fix_success'] = parse_err2 is None
+        out['syntax_error_after_fix'] = parse_err2
+        if parse_err2 is None:
+            tree = tree2
+    # attempt rewrite via AST unparse if parse ok
+    rewritten = None
+    if tree is not None:
+        up = attempt_unparse(tree)
+        if up:
+            # ast.unparse may produce compact formatting — re-indent nicely
+            rewritten = textwrap.dedent(up) + ("\n" if not up.endswith("\n") else "")
+    out['rewritten_code'] = rewritten
+    out['pep8_issues'] = pep8_checks(code_norm, max_line=max_line_len)
+    out['explanations'] = explain_by_ast(code_norm)
+    out['performance_hints'] = performance_hints(code_norm)
+    out['structure_suggestions'] = suggest_structure(code_norm)
+    return out
+
+# -----------------------
+# Button events
+# -----------------------
+if analyze_btn or full_run:
+    st.markdown("## 🔎 ผลการวิเคราะห์ (static)")
+    result = do_full_analysis(user_code, max_line_len=max_line_length)
+    # show syntax
+    if result['syntax_error']:
+        st.error(f"❌ Syntax Error: {result['syntax_error']}")
+        if result.get('auto_fixed_attempt'):
+            st.info("ลองแก้โค้ดอัตโนมัติแบบง่ายแล้ว — ดูด้านล่าง (auto fix attempt)")
     else:
-        st.success("Parsed successfully (AST OK).")
-    if show_pep8:
-        st.markdown("**PEP8 Heuristics**")
-        issues = pep8_heuristics(code)
-        if issues:
-            for ln, msg in issues:
-                st.warning(f"Line {ln}: {msg}")
-        else:
-            st.info("No PEP8 issues (heuristic) found.")
-    st.markdown("**AST-based explanation (high-level)**")
-    for ln, text in explain_ast_lines(code):
-        st.write(f"Line {ln}: {text}")
-    if show_perf:
-        st.markdown("**Performance hints (heuristic)**")
-        for hint in performance_hints(code):
-            st.info(hint)
+        st.success("✔️ Syntax ปกติ")
+    # show normalized code
+    with st.expander("โค้ด (normalize indentation)"):
+        st.code(result['normalized_code'], language="python")
+    if result.get('auto_fixed_attempt'):
+        with st.expander("โค้ดที่ระบบพยายามแก้ให้อัตโนมัติ (conservative fix)"):
+            st.code(result['auto_fixed_attempt'], language="python")
+            if result['auto_fix_success']:
+                st.success("ระบบแก้ไขสำเร็จ (parsed OK) — แต่ควรตรวจดูว่า logic ถูกต้องตามต้องการ")
+            else:
+                st.warning("ระบบแก้แล้วยังมี Syntax Error — กรุณาตรวจโค้ดต้นฉบับ")
 
-def do_ai_analysis(code: str):
-    if not getattr(openai, "api_key", None):
-        st.error("OpenAI API key not configured. Set it in sidebar or environment variable.")
-        return
-    tasks = ["rewrite", "line_by_line", "pep8", "performance"]
-    st.subheader("🤖 AI Deep Analysis")
-    with st.spinner("Sending to AI model..."):
-        prompt = build_ai_prompt(code, tasks)
-        result = call_openai_chat(prompt, model=model_choice, temperature=temperature)
-    if not result:
-        return
-    if "raw" in result:
-        st.markdown("**Raw AI response (not JSON)**")
-        st.code(result["raw"])
-        return
-    # show rewritten
-    if result.get("rewritten"):
-        st.markdown("**Rewritten Code (AI suggestion)**")
-        st.code(result["rewritten"], language="python")
-    if result.get("explanation"):
-        st.markdown("**Line-by-line Explanation (AI)**")
-        st.text(result["explanation"])
-    if result.get("pep8"):
-        st.markdown("**PEP8 Suggestions (AI)**")
-        st.text(result["pep8"])
-    if result.get("performance"):
-        st.markdown("**Performance Suggestions (AI)**")
-        st.text(result["performance"])
-    if result.get("suggestions"):
-        st.markdown("**Other Suggestions**")
-        st.text(result["suggestions"])
-
-# ----------------------------
-# Button handlers
-# ----------------------------
-if analyze_btn:
-    do_static_analysis(code_input)
-
-if ai_btn:
-    if not use_ai:
-        st.warning("Enable 'Enable AI analysis' in sidebar first.")
+    # rewritten (AST unparse)
+    if result.get('rewritten_code'):
+        with st.expander("Rewrite (normalized via AST.unparse) — โค้ดที่แนะนำ"):
+            st.code(result['rewritten_code'], language="python")
     else:
-        do_ai_analysis(code_input)
+        st.info("ไม่สามารถ rewrite ด้วย AST ได้ (อาจเป็นเพราะไม่รองรับ ast.unparse ใน environment นี้)")
 
-if all_btn:
-    do_static_analysis(code_input)
-    if use_ai:
-        do_ai_analysis(code_input)
+    # PEP8 issues
+    st.markdown("### 🧾 ผลตรวจ PEP8 / Style (เบื้องต้น)")
+    if result['pep8_issues']:
+        for ln, code_key, msg in result['pep8_issues']:
+            st.warning(f"บรรทัด {ln}: {msg}")
+    else:
+        st.success("✔️ ไม่มีปัญหา style ที่ตรวจพบ (ตาม heuristics ของเรา)")
+
+    # Explanations by line
+    st.markdown("### 📖 อธิบายโค้ดทีละบรรทัด (จาก AST)")
+    if result['explanations']:
+        last_ln = -1
+        for ln, text in result['explanations']:
+            st.write(f"**บรรทัด {ln}:** {text}")
+    else:
+        st.info("ไม่พบโครงสร้างให้วิเคราะห์ (หรือโค้ดว่าง)")
+
+    # performance
+    st.markdown("### ⚡ คำแนะนำด้าน performance (heuristic)")
+    for h in result['performance_hints']:
+        st.info(h)
+
+    # structure suggestions
+    st.markdown("### 🧱 คำแนะนำโครงสร้างโค้ด")
+    for s in result['structure_suggestions']:
+        st.write("- " + s)
+
+    if show_raw_ast and ('rewritten_code' in result and result['rewritten_code']):
+        try:
+            st.subheader("Raw AST")
+            tree2, _ = safe_parse(result['rewritten_code'])
+            st.text(ast.dump(tree2, include_attributes=True, indent=2))
+        except Exception:
+            pass
+
+if rewrite_btn or full_run:
+    st.markdown("## ✍️ Rewrite / Suggested Fixes")
+    # produce rewritten code and a suggested "refactor skeleton"
+    res = do_full_analysis(user_code, max_line_len=max_line_length)
+    rewritten = res.get('rewritten_code') or res.get('auto_fixed_attempt') or normalize_indentation(user_code)
+    # further enhance: add main guard if missing
+    try:
+        tree = ast.parse(rewritten)
+        has_main = any(isinstance(n, ast.If) and isinstance(n.test, ast.Compare) and
+                       isinstance(n.test.left, ast.Name) and n.test.left.id == '__name__' for n in tree.body if isinstance(n, ast.If))
+    except Exception:
+        has_main = False
+
+    suggested = rewritten
+    if not has_main:
+        # find top-level executable statements and wrap into main skeleton suggestion (done non-destructively: create a recommended file)
+        suggested = (
+            "# Suggested refactor: separate logic into functions and add main guard\n"
+            "def main():\n"
+        )
+        # indent original top-level code into main (but avoid re-indenting function/class/import blocks)
+        try:
+            tree_orig = ast.parse(rewritten)
+            body_lines = rewritten.splitlines()
+            # naive: include all code but indent everything by 4 (conservative)
+            for ln in rewritten.splitlines():
+                suggested += "    " + ln + "\n"
+            suggested += "\nif __name__ == '__main__':\n    main()\n"
+        except Exception:
+            suggested = rewritten + "\n\n# Add: if __name__ == '__main__': main()"
+
+    st.subheader("โค้ดที่ rewrite/normalize แล้ว")
+    st.code(rewritten, language="python")
+
+    st.subheader("โค้ดที่แนะนำ (refactor skeleton)")
+    st.code(suggested, language="python")
+
+    st.markdown("**หมายเหตุ:** การ rewrite นี้เป็น automated และเป็น conservative fix — โปรดตรวจสอบ logic และ unit test ก่อนใช้งานจริง")
+
+# -----------------------
+# Utility: quick tips & examples
+# -----------------------
+st.markdown("---")
+st.markdown("## 💡 เคล็ดลับสั้น ๆ")
+st.markdown("""
+- ถ้าต้องการให้ระบบอธิบายทีละบรรทัดได้แม่นขึ้น: ใส่ docstring/คอมเมนต์สั้น ๆ ในฟังก์ชัน  
+- สำหรับ performance: ถ้ามี nested loop สูง ควรพิจารณาอัลกอริทึมใหม่หรือใช้ library เช่น `numpy`/`pandas` สำหรับงานเชิงตัวเลข  
+- โค้ดที่ rewrite โดย AST จะเปลี่ยนรูปแบบ (formatting) — ถ้าต้องการ style ที่รัดกุม แนะนำใช้ `black` หรือ `autopep8` ภายนอก (ต้องติดตั้งเพิ่ม)  
+""")
+
+st.markdown("---")
+st.markdown("ถ้าต้องการ ผมช่วยต่อได้: \n- เชื่อมกับ `black` / `autopep8` เพื่อ format ตาม PEP8 อัตโนมัติ\n- เพิ่ม unit-test generator (pytest)\n- เพิ่ม feature ให้ระบบเสนอแก้ทีละจุด และ apply ตามเลือกของผู้ใช้")
