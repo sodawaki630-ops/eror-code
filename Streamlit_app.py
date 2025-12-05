@@ -1,82 +1,178 @@
 import streamlit as st
+import ast
+import re
 
-st.set_page_config(page_title="Basic Error Checker", page_icon="🛠️", layout="wide")
+# ---------------------------------------------------
+# Page Config
+# ---------------------------------------------------
+st.set_page_config(page_title="Ultimate Python Error Helper", page_icon="🛠️", layout="wide")
 
-st.title("🛠️ เครื่องหาข้อผิดพลาดเบื้องต้น (Basic Error Checker)")
-st.write("ตรวจความผิดพลาดในโค้ด Python แบบง่ายๆ")
+st.title("🛠️ Ultimate Python Error Helper")
+st.caption("ตรวจหาข้อผิดพลาด • วิเคราะห์โค้ด • อธิบายโค้ด • เสนอวิธีแก้ไข")
 
-code = st.text_area("พิมพ์โค้ด Python ที่ต้องการตรวจสอบ:", height=250)
+# ---------------------------------------------------
+# Dark Mode Toggle
+# ---------------------------------------------------
+dark_mode = st.toggle("🌙 Dark Mode")
 
-check_btn = st.button("🔍 ตรวจโค้ด")
+if dark_mode:
+    st.markdown("""
+        <style>
+            body { background-color: #0d1117; color: #c9d1d9; }
+            .stTextInput textarea, .stTextArea textarea { background-color: #161b22 !important; color: #c9d1d9 !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
+# ---------------------------------------------------
+# Input Code
+# ---------------------------------------------------
+code = st.text_area("พิมพ์โค้ด Python ที่ต้องการตรวจ:", height=250)
+
+run_btn = st.button("🔍 ตรวจโค้ด + แก้ไขให้")
+
+# ---------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------
+
+def check_syntax(code):
+    try:
+        compile(code, "<string>", "exec")
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 def check_brackets(text):
-    brackets = {
-        "(": ")", 
-        "[": "]", 
-        "{": "}"
-    }
+    brackets = {"(": ")", "[": "]", "{": "}"}
     stack = []
-    for i, char in enumerate(text):
-        if char in brackets:
-            stack.append((char, i))
-        elif char in brackets.values():
-            if not stack or brackets[stack[-1][0]] != char:
-                return f"❌ วงเล็บปิดเกินที่ index {i}"
+    for i, ch in enumerate(text):
+        if ch in brackets:
+            stack.append((ch, i))
+        elif ch in brackets.values():
+            if not stack or brackets[stack[-1][0]] != ch:
+                return f"พบวงเล็บปิดเกินแถว index {i}"
             stack.pop()
     if stack:
-        return f"❌ วงเล็บเปิดยังไม่ปิดที่ index {stack[-1][1]}"
-    return "✔️ วงเล็บถูกต้องครบถ้วน"
+        return f"วงเล็บเปิดที่ index {stack[-1][1]} ยังไม่ถูกปิด"
+    return None
 
-if check_btn:
+def find_undefined(code):
+    declared = set()
+    used = set()
+
+    for line in code.split("\n"):
+        line_strip = line.strip()
+        if "=" in line_strip and not line_strip.startswith("#"):
+            var = line_strip.split("=")[0].strip()
+            if var.isidentifier():
+                declared.add(var)
+
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_strip):
+            used.add(token)
+
+    # ลบ keyword
+    python_keywords = {
+        "def","return","if","else","for","while","class","import","from","in","and","or","not"
+    }
+    used = used - python_keywords
+
+    undefined = used - declared
+    return undefined
+
+def guess_missing_imports(code):
+    common = ["json","random","math","os","re","datetime"]
+    missing = []
+    for m in common:
+        if f"{m}." in code and f"import {m}" not in code:
+            missing.append(m)
+    return missing
+
+def explain_code(code):
+    explanation = []
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                explanation.append(f"กำหนดตัวแปร `{node.targets[0].id}`")
+            elif isinstance(node, ast.FunctionDef):
+                explanation.append(f"ฟังก์ชัน `{node.name}` ใช้งานสำหรับงานบางอย่างในโปรแกรม")
+            elif isinstance(node, ast.If):
+                explanation.append("มีการตรวจสอบเงื่อนไขด้วย if")
+            elif isinstance(node, ast.For):
+                explanation.append("มีการวนลูป for")
+            elif isinstance(node, ast.While):
+                explanation.append("มีการวนลูป while")
+        return "\n".join(explanation) if explanation else "ไม่มีโครงสร้างสำคัญให้วิเคราะห์"
+    except:
+        return "ไม่สามารถอธิบายโค้ดได้ เนื่องจากมี Syntax Error"
+
+def basic_auto_fix(code):
+    fixed = code
+
+    # แก้ tab → 4 spaces
+    fixed = fixed.replace("\t", "    ")
+
+    # เติม pass ถ้าฟังก์ชันว่าง
+    fixed = re.sub(r"def (.*):\s*$", r"def \1:\n    pass", fixed)
+
+    # แก้วงเล็บเยื้องต้น (ง่ายมาก)
+    if check_brackets(code):
+        fixed += "\n# TODO: ตรวจสอบวงเล็บไม่ครบ"
+
+    return fixed
+
+# ---------------------------------------------------
+# Main Output
+# ---------------------------------------------------
+
+if run_btn:
+
     if not code.strip():
-        st.warning("กรุณาใส่โค้ดก่อนตรวจนะครับ 🙂")
+        st.warning("กรุณาใส่โค้ดก่อนตรวจครับ")
+        st.stop()
+
+    st.header("📌 ผลการตรวจสอบ")
+
+    # 1) Syntax Check
+    st.subheader("1) ตรวจ Syntax")
+    syntax_error = check_syntax(code)
+    if syntax_error:
+        st.error(f"❌ พบ Syntax Error:\n{syntax_error}")
     else:
-        st.subheader("ผลการตรวจสอบ")
+        st.success("✔️ Syntax ปกติ ไม่พบข้อผิดพลาด")
 
-        # --- ตรวจ Syntax ---
-        try:
-            compile(code, "<string>", "exec")
-            st.success("✔️ Syntax ปกติ ไม่พบข้อผิดพลาด")
-        except Exception as e:
-            st.error(f"❌ พบ Syntax Error: `{type(e).__name__}` → {e}")
+    # 2) Bracket Check
+    st.subheader("2) ตรวจวงเล็บ")
+    bracket_issue = check_brackets(code)
+    if bracket_issue:
+        st.warning(f"⚠️ {bracket_issue}")
+    else:
+        st.success("✔️ วงเล็บครบถ้วน")
 
-        # --- ตรวจวงเล็บ ---
-        st.write("### 🔎 ตรวจวงเล็บ")
-        st.write(check_brackets(code))
+    # 3) Undefined variable
+    st.subheader("3) ตัวแปรที่ยังไม่ถูกประกาศ")
+    undefined = find_undefined(code)
+    if undefined:
+        st.warning("⚠️ อาจยังไม่ประกาศตัวแปร: " + ", ".join(undefined))
+    else:
+        st.success("✔️ ไม่พบตัวแปรที่ไม่ถูกประกาศ")
 
-        # --- ตรวจตัวแปรที่ใช้งานแต่ไม่ประกาศ ---
-        st.write("### 🔎 ตรวจตัวแปรที่อาจไม่ถูกประกาศ")
-        lines = code.split("\n")
-        declared = set()
-        used = set()
+    # 4) Missing imports
+    st.subheader("4) โมดูลที่อาจลืม import")
+    missing = guess_missing_imports(code)
+    if missing:
+        st.warning("⚠️ อาจลืม import โมดูล: " + ", ".join(missing))
+    else:
+        st.success("✔️ ไม่พบโมดูลที่ลืม")
 
-        for line in lines:
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                var = line.split("=")[0].strip()
-                if var.isidentifier():
-                    declared.add(var)
-            for token in line.split():
-                if token.isidentifier():
-                    used.add(token)
+    # 5) Code Explanation
+    st.header("📘 อธิบายโค้ด")
+    st.info(explain_code(code))
 
-        undefined_vars = used - declared
+    # 6) Auto Fix
+    st.header("🛠️ โค้ดที่ระบบช่วยแก้ให้ (เบื้องต้น)")
+    fixed_code = basic_auto_fix(code)
+    st.code(fixed_code, language="python")
 
-        if undefined_vars:
-            st.warning(f"⚠️ ตัวแปรที่อาจยังไม่ถูกประกาศ: {', '.join(undefined_vars)}")
-        else:
-            st.info("✔️ ไม่พบตัวแปรที่ใช้งานก่อนประกาศ")
+    st.success("เสร็จเรียบร้อย! 🎉")
 
-        # --- ตรวจ import ที่อาจลืม ---
-        st.write("### 🔎 ตรวจโมดูลที่อาจถูกเรียกใช้แต่ไม่ถูก import")
-        common_modules = ["json", "math", "random", "os"]
-        missing_imports = []
 
-        for m in common_modules:
-            if f"{m}." in code and f"import {m}" not in code:
-                missing_imports.append(m)
-
-        if missing_imports:
-            st.warning(f"⚠️ อาจลืม import โมดูล: {', '.join(missing_imports)}")
-        else:
-            st.info("✔️ ไม่พบโมดูลที่ลืม import")
